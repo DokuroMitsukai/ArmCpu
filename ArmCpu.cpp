@@ -122,6 +122,16 @@ static void spiIpiSend (uintptr_t dist, uint32_t core)
   __asm__ volatile ("dsb sy" ::: "memory");
 }
 
+// The cluster type the ADT gives this core (cluster-type 'E' or 'P'), so each cluster registers as its own processor set.
+static cluster_type_t clusterType (uint32_t physical)
+{
+  const ml_topology_info_t *topology = ml_get_topology_info ();
+  for (unsigned i = 0; i < topology->num_cpus; i++) {
+    if (topology->cpus[i].phys_id == physical) { return topology->cpus[i].cluster_type; }
+  }
+  return ml_get_boot_cluster_type ();
+}
+
 static uint64_t counter (void)
 {
   uint64_t value;
@@ -399,7 +409,7 @@ bool ArmCpu::start (IOService *provider)
   info.phys_id = physical;
   info.log_id = logicalId;
   info.cluster_id = static_cast<uint32_t> (ml_get_cluster_number (physical));
-  info.cluster_type = ml_get_boot_cluster_type ();
+  info.cluster_type = clusterType (physical);
   perfmon_interrupt_handler_func pmi = nullptr;
   kern_return_t status = ml_processor_register (&info, &machProcessor, &ipi_handler, &pmi);
   if (status != KERN_SUCCESS) { panic ("ArmCpu: CPU %u registration failed: %d", logicalId, status); }
@@ -449,7 +459,7 @@ bool ArmCpu::finishSecondary (void)
   info.phys_id = static_cast<uint32_t> (affinity);
   info.log_id = logicalId;
   info.cluster_id = static_cast<uint32_t> (ml_get_cluster_number (static_cast<uint32_t> (affinity)));
-  info.cluster_type = ml_get_boot_cluster_type ();
+  info.cluster_type = clusterType (static_cast<uint32_t> (affinity));
   perfmon_interrupt_handler_func pmi = nullptr;
   kern_return_t status = ml_processor_register (&info, &machProcessor, &ipi_handler, &pmi);
   if (status != KERN_SUCCESS) { armcpu_smp_fail[logicalId] = 4; return false; }
@@ -497,6 +507,9 @@ void ArmCpu::startThread (void *argument, wait_result_t)
   armcpu_smp_step[self->logicalId] = 3;
   // Blocks until the new core reaches the scheduler; a core that never arrives only stalls this helper thread.
   processor_start (self->machProcessor);
+  // Once every secondary core has started, the scheduler sets up its cluster edges (Edge migration and steal rules).
+  static uint32_t started = 0;
+  if (__atomic_add_fetch (&started, 1U, __ATOMIC_ACQ_REL) + 1 == ml_get_topology_info ()->num_cpus) { ml_cpu_init_completed (); }
   thread_terminate (current_thread ());
 }
 
