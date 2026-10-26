@@ -221,22 +221,28 @@ bool ArmCpu::mapGic (void)
   OSData *ranges = OSDynamicCast (OSData, soc->getProperty ("ranges"));
   OSData *reg = OSDynamicCast (OSData, gic->getProperty ("reg"));
   OSData *compatible = OSDynamicCast (OSData, gic->getProperty ("compatible"));
-  uint64_t bus[3];
+  uint64_t bus[3] = {0, 0, ~0ULL};
   uint64_t regions[8];
   const bool gicV3 = gicCompatible (compatible, "arm,gic-v3", sizeof ("arm,gic-v3"));
   const bool gicV2 = gicCompatible (compatible, "arm,gic-400", sizeof ("arm,gic-400")) ||
                      gicCompatible (compatible, "arm,cortex-a15-gic", sizeof ("arm,cortex-a15-gic"));
+  // An absent or empty ranges property means the bus is 1:1. The UniXNU ADT
+  // builder synthesises one 24-byte range for /arm-io and makes each child
+  // reg value relative to that base, so the translated path is the normal
+  // one; the identity branch covers a tree that supplies no range at all.
+  const bool identityRanges = (ranges == nullptr) || (ranges->getLength () == 0);
+  const bool validRanges = identityRanges || (ranges->getLength () == sizeof (bus));
   // GICv3 usually describes a distributor and one redistributor region. GICv2
   // describes the distributor, CPU interface, virtual interface control and
   // virtual CPU interface, so the board tree has four reg entries. Only the
   // first two are needed here; the virtual-interface window belongs to a
   // hypervisor and must not be mapped by the kernel.
   const size_t regionBytes = reg != nullptr ? reg->getLength () : 0;
-  bool valid = (ranges != nullptr) && (ranges->getLength () == sizeof (bus)) &&
+  bool valid = validRanges &&
                (regionBytes == 4 * sizeof (uint64_t) || regionBytes == 8 * sizeof (uint64_t)) &&
                (gicV3 || gicV2);
   if (valid) {
-    memcpy (bus, ranges->getBytesNoCopy (), sizeof (bus));
+    if (!identityRanges) { memcpy (bus, ranges->getBytesNoCopy (), sizeof (bus)); }
     memcpy (regions, reg->getBytesNoCopy (), regionBytes);
   }
   OSData *strideProperty = OSDynamicCast (OSData, gic->getProperty ("redistributor-stride"));
@@ -252,17 +258,21 @@ bool ArmCpu::mapGic (void)
       (gicV2 && ((regions[1] < 0x1000) || (regions[3] < 0x1000)))) {
     return false;
   }
-  for (unsigned index = 0; index < 4; index += 2) {
-    if ((regions[index] < bus[0]) || (regions[index] - bus[0] > bus[2]) ||
-        (regions[index + 1] > bus[2] - (regions[index] - bus[0])) ||
-        (bus[1] + regions[index] - bus[0] < bus[1])) {
-      return false;
+  if (!identityRanges) {
+    for (unsigned index = 0; index < 4; index += 2) {
+      if ((regions[index] < bus[0]) || (regions[index] - bus[0] > bus[2]) ||
+          (regions[index + 1] > bus[2] - (regions[index] - bus[0])) ||
+          (bus[1] + regions[index] - bus[0] < bus[1])) {
+        return false;
+      }
     }
   }
+  const uint64_t distPhysical = identityRanges ? regions[0] : bus[1] + regions[0] - bus[0];
+  const uint64_t secondPhysical = identityRanges ? regions[2] : bus[1] + regions[2] - bus[0];
   OSSharedPtr<IOMemoryDescriptor> distMemory (IOMemoryDescriptor::withPhysicalAddress (
-      bus[1] + regions[0] - bus[0], regions[1], kIODirectionInOut), OSNoRetain);
+      distPhysical, regions[1], kIODirectionInOut), OSNoRetain);
   OSSharedPtr<IOMemoryDescriptor> secondMemory (IOMemoryDescriptor::withPhysicalAddress (
-      bus[1] + regions[2] - bus[0], regions[3], kIODirectionInOut), OSNoRetain);
+      secondPhysical, regions[3], kIODirectionInOut), OSNoRetain);
   if (!distMemory || !secondMemory) {
     return false;
   }
