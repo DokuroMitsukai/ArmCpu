@@ -222,15 +222,22 @@ bool ArmCpu::mapGic (void)
   OSData *reg = OSDynamicCast (OSData, gic->getProperty ("reg"));
   OSData *compatible = OSDynamicCast (OSData, gic->getProperty ("compatible"));
   uint64_t bus[3];
-  uint64_t regions[4];
+  uint64_t regions[8];
   const bool gicV3 = gicCompatible (compatible, "arm,gic-v3", sizeof ("arm,gic-v3"));
   const bool gicV2 = gicCompatible (compatible, "arm,gic-400", sizeof ("arm,gic-400")) ||
                      gicCompatible (compatible, "arm,cortex-a15-gic", sizeof ("arm,cortex-a15-gic"));
+  // GICv3 usually describes a distributor and one redistributor region. GICv2
+  // describes the distributor, CPU interface, virtual interface control and
+  // virtual CPU interface, so the board tree has four reg entries. Only the
+  // first two are needed here; the virtual-interface window belongs to a
+  // hypervisor and must not be mapped by the kernel.
+  const size_t regionBytes = reg != nullptr ? reg->getLength () : 0;
   bool valid = (ranges != nullptr) && (ranges->getLength () == sizeof (bus)) &&
-               (reg != nullptr) && (reg->getLength () == sizeof (regions)) && (gicV3 || gicV2);
+               (regionBytes == 4 * sizeof (uint64_t) || regionBytes == 8 * sizeof (uint64_t)) &&
+               (gicV3 || gicV2);
   if (valid) {
     memcpy (bus, ranges->getBytesNoCopy (), sizeof (bus));
-    memcpy (regions, reg->getBytesNoCopy (), sizeof (regions));
+    memcpy (regions, reg->getBytesNoCopy (), regionBytes);
   }
   OSData *strideProperty = OSDynamicCast (OSData, gic->getProperty ("redistributor-stride"));
   if (strideProperty != nullptr && strideProperty->getLength () == sizeof (uint64_t)) {
